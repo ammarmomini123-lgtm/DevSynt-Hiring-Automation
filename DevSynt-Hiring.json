@@ -1,0 +1,702 @@
+{
+  "name": "DevSynt-Hiring",
+  "nodes": [
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ============================================================\n// AI MEETING / APPLICANT DATA NORMALIZATION\n// Mode: Run Once for Each Item\n// ============================================================\n\n// Get the CURRENT item\nconst item = $input.item.json;\n\n\n// ============================================================\n// HELPER: Find a field regardless of capitalization/spacing\n// ============================================================\n\nfunction findField(data, possibleNames) {\n  const keys = Object.keys(data);\n\n  for (const name of possibleNames) {\n\n    // Exact match first\n    if (data[name] !== undefined && data[name] !== null && data[name] !== \"\") {\n      return data[name];\n    }\n\n    // Flexible match\n    const normalizedName = name\n      .toLowerCase()\n      .replace(/[^a-z0-9]/g, \"\");\n\n    const matchingKey = keys.find(key => {\n      const normalizedKey = key\n        .toLowerCase()\n        .replace(/[^a-z0-9]/g, \"\");\n\n      return normalizedKey === normalizedName;\n    });\n\n    if (\n      matchingKey &&\n      data[matchingKey] !== undefined &&\n      data[matchingKey] !== null &&\n      data[matchingKey] !== \"\"\n    ) {\n      return data[matchingKey];\n    }\n  }\n\n  return \"\";\n}\n\n\n// ============================================================\n// 1. EXTRACT FORM / GOOGLE SHEETS DATA\n// ============================================================\n\nconst sheetName = findField(item, [\n  \"Full Name\",\n  \"Name\",\n  \"FullName\"\n]);\n\nconst sheetEmail = findField(item, [\n  \"Email Address\",\n  \"Email\",\n  \"EmailAddress\"\n]);\n\nconst sheetPhone = findField(item, [\n  \"Phone Number\",\n  \"Phone\",\n  \"PhoneNumber\",\n  \"Mobile\",\n  \"Contact Number\"\n]);\n\nconst sheetRole = findField(item, [\n  \"Role Applied For\",\n  \"Role\",\n  \"Position\",\n  \"Job Role\",\n  \"RoleAppliedFor\"\n]);\n\nconst sheetResume = findField(item, [\n  \"Resume Link / Text\",\n  \"Resume Link\",\n  \"Resume Text\",\n  \"Resume\",\n  \"CV\",\n  \"CV Link\"\n]);\n\n\n// ============================================================\n// 2. CHECK WHETHER THIS IS FORM/SHEET DATA\n// ============================================================\n\nconst hasFormData = Boolean(\n  sheetName ||\n  sheetEmail ||\n  sheetPhone ||\n  sheetRole ||\n  sheetResume\n);\n\n\n// ============================================================\n// 3. GMAIL HEADER HELPER\n// ============================================================\n\nfunction getGmailHeader(headers, headerName) {\n\n  if (!Array.isArray(headers)) {\n    return \"\";\n  }\n\n  const header = headers.find(\n    h =>\n      String(h.name || \"\").toLowerCase() ===\n      headerName.toLowerCase()\n  );\n\n  return header?.value || \"\";\n}\n\n\n// ============================================================\n// 4. DECODE GMAIL BODY\n// ============================================================\n\nfunction decodeBase64Url(data) {\n\n  if (!data) {\n    return \"\";\n  }\n\n  try {\n\n    const base64 = data\n      .replace(/-/g, \"+\")\n      .replace(/_/g, \"/\");\n\n    return Buffer\n      .from(base64, \"base64\")\n      .toString(\"utf8\");\n\n  } catch (error) {\n\n    return \"\";\n  }\n}\n\n\n// ============================================================\n// 5. EXTRACT GMAIL BODY RECURSIVELY\n// ============================================================\n\nfunction extractGmailBody(part) {\n\n  if (!part) {\n    return \"\";\n  }\n\n  // Direct body\n  if (part.body?.data) {\n\n    const decoded = decodeBase64Url(part.body.data);\n\n    if (decoded) {\n      return decoded;\n    }\n  }\n\n  // Nested Gmail parts\n  if (Array.isArray(part.parts)) {\n\n    for (const child of part.parts) {\n\n      const text = extractGmailBody(child);\n\n      if (text) {\n        return text;\n      }\n    }\n  }\n\n  return \"\";\n}\n\n\n// ============================================================\n// 6. IF FORM / GOOGLE SHEETS DATA EXISTS\n// ============================================================\n\nif (hasFormData) {\n\n  return {\n    json: {\n\n      name:\n        String(sheetName || \"Unknown Applicant\").trim(),\n\n      email:\n        String(sheetEmail || \"\").trim(),\n\n      phone:\n        sheetPhone\n          ? String(sheetPhone).trim()\n          : null,\n\n      source:\n        \"form\",\n\n      role_applied:\n        String(\n          sheetRole || \"General Application\"\n        ).trim(),\n\n      resume_text:\n        String(sheetResume || \"\").trim(),\n\n      applied_at:\n        new Date().toISOString()\n\n    }\n  };\n}\n\n\n// ============================================================\n// 7. OTHERWISE PROCESS GMAIL DATA\n// ============================================================\n\nlet rawFrom =\n  item.From ||\n  item.from ||\n  \"\";\n\n\n// Look inside Gmail payload headers\nif (item.payload?.headers) {\n\n  const fromHeader = getGmailHeader(\n    item.payload.headers,\n    \"From\"\n  );\n\n  if (fromHeader) {\n    rawFrom = fromHeader;\n  }\n}\n\n\n// ============================================================\n// 8. EXTRACT EMAIL ADDRESS\n// ============================================================\n\nconst emailMatch =\n  String(rawFrom).match(/<([^>]+)>/);\n\nconst gmailEmail =\n  emailMatch\n    ? emailMatch[1].trim()\n    : String(rawFrom).trim();\n\n\n// ============================================================\n// 9. EXTRACT NAME\n// ============================================================\n\nconst gmailName =\n  String(rawFrom).includes(\"<\")\n    ? String(rawFrom)\n        .split(\"<\")[0]\n        .replace(/\"/g, \"\")\n        .trim()\n    : gmailEmail;\n\n\n// ============================================================\n// 10. EXTRACT SUBJECT\n// ============================================================\n\nlet gmailSubject =\n  item.Subject ||\n  item.subject ||\n  \"\";\n\nif (!gmailSubject && item.payload?.headers) {\n\n  gmailSubject = getGmailHeader(\n    item.payload.headers,\n    \"Subject\"\n  );\n}\n\n\n// ============================================================\n// 11. EXTRACT EMAIL BODY\n// ============================================================\n\nlet gmailBody =\n  item.textPlain ||\n  item.text ||\n  item.body ||\n  \"\";\n\n\n// Try Gmail payload\nif (!gmailBody && item.payload) {\n\n  gmailBody =\n    extractGmailBody(item.payload);\n}\n\n\n// Last fallback\nif (!gmailBody) {\n\n  gmailBody =\n    item.snippet ||\n    \"\";\n}\n\n\n// ============================================================\n// 12. RETURN NORMALIZED GMAIL DATA\n// ============================================================\n\nreturn {\n  json: {\n\n    name:\n      gmailName ||\n      \"Email Applicant\",\n\n    email:\n      gmailEmail ||\n      \"\",\n\n    phone:\n      null,\n\n    source:\n      \"email\",\n\n    role_applied:\n      gmailSubject ||\n      \"General Application\",\n\n    resume_text:\n      gmailBody ||\n      \"\",\n\n    applied_at:\n      new Date().toISOString()\n\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -144,
+        -320
+      ],
+      "id": "a6ee96a2-3bdc-4eb8-86ca-edfeef1b8728",
+      "name": "normalization"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "filters": {}
+      },
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        -384,
+        -208
+      ],
+      "id": "a9d59540-a7bc-41af-b784-92aeabc9f2fb",
+      "name": "Gmail Trigger",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SCrrj0YVjgkqfo8M",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {}
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -384,
+        80
+      ],
+      "id": "c3c95fd7-8c3d-477c-969f-8a891c024cfb",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.classification }}",
+                    "rightValue": "Strong",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "id": "66a53a4b-3c7b-4906-8aee-12429ce73822"
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "585b8501-f112-49c1-b5d2-31639de9e4c1",
+                    "leftValue": "={{ $json.classification }}",
+                    "rightValue": "Average",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 3
+                },
+                "conditions": [
+                  {
+                    "id": "027b64a8-bc35-45c8-a2db-932253fd41c3",
+                    "leftValue": "={{ $json.classification }}",
+                    "rightValue": "Weak",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [
+        64,
+        64
+      ],
+      "id": "6ed5c7b9-a231-4676-af33-ee410141729d",
+      "name": "Switch"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute"
+            }
+          ]
+        },
+        "documentId": {
+          "__rl": true,
+          "value": "1nYgF-cbdWd54XFO4zYSjBs3MOQ96w7XjJnPt_D6bU_I",
+          "mode": "list",
+          "cachedResultName": "Form Responses 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nYgF-cbdWd54XFO4zYSjBs3MOQ96w7XjJnPt_D6bU_I/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 10416283,
+          "mode": "list",
+          "cachedResultName": "Form Responses 1",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1nYgF-cbdWd54XFO4zYSjBs3MOQ96w7XjJnPt_D6bU_I/edit#gid=10416283"
+        },
+        "event": "rowAdded",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheetsTrigger",
+      "typeVersion": 1,
+      "position": [
+        -384,
+        -416
+      ],
+      "id": "620496a9-3bc3-4c27-a6b4-4d5c894c2754",
+      "name": "Google Sheets Trigger",
+      "credentials": {
+        "googleSheetsTriggerOAuth2Api": {
+          "id": "qBFbi4al8SYK4pMT",
+          "name": "Google Sheets Trigger account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('Getting the rows').item.json.email }}",
+        "subject": "Application Status: Shortlisted!",
+        "message": "=<p>Dear <strong>{{ $('Getting the rows').item.json.name }}</strong>,</p>\n\n<p>We are thrilled to inform you that you have been shortlisted for the position of <strong>{{ $('Getting the rows').item.json.role_applied }}</strong> at DevSynt!</p>\n\n<p>We received your application on {{ $('Getting the rows').item.json.applied_at.split('T')[0] }}. Our team is currently scheduling interview slots, and we will notify you shortly regarding the date and time.</p>\n\n<p>Best regards,<br>\n<strong>Hiring Team</strong><br>\nDevSynt</p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        352,
+        -48
+      ],
+      "id": "9e0e46a9-5046-4968-b048-fd058a6a78b9",
+      "name": "shortlisted",
+      "webhookId": "ad4e55d1-9b54-4a10-95ac-3cbd8347b003",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SCrrj0YVjgkqfo8M",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "Referring to Hiring Manager- Average Application",
+        "message": "=<p>Hello Hiring Manager,</p>  <p>A candidate requiring manual review has been flagged by the AI screening system for the role of <strong>{{ $('Getting the rows').item.json.role_applied }}</strong>.</p>  <p><strong>Candidate Details:</strong></p> <ul>   <li><strong>Name:</strong> {{ $('Getting the rows').item.json.name }}</li>   <li><strong>Email:</strong> {{ $('Getting the rows').item.json.email }}</li>   <li><strong>Phone:</strong> {{ $('Getting the rows').item.json.phone || 'N/A' }}</li>   <li><strong>Source:</strong> {{ $('Getting the rows').item.json.source }}</li>   <li><strong>Applied Date:</strong> {{ $('Getting the rows').item.json.applied_at.split('T')[0] }}</li>   <li><strong>ATS Score:</strong> {{ $('Getting the rows').item.json.ats_score }}/100</li>   <li><strong>AI Classification:</strong> Average</li> </ul>  <p><strong>AI Evaluation Summary / Notes:</strong><br> <em>{{ $('Getting the rows').item.json.manager_notes || 'No notes provided.' }}</em></p>  <p>Please review this candidate's details in Supabase and update their status accordingly.</p>  <p>Best regards,<br> <strong>DevSynt Automation Pipeline</strong></p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        352,
+        144
+      ],
+      "id": "f7876dad-294e-4ba1-8750-25d67d6e6fff",
+      "name": "manual-review",
+      "webhookId": "ad4e55d1-9b54-4a10-95ac-3cbd8347b003",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SCrrj0YVjgkqfo8M",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.email }}",
+        "subject": "Application Status-DevSynt",
+        "message": "=<p>Dear <strong>{{ $('Getting the rows').item.json.name }}</strong>,</p>  <p>Thank you for taking the time to apply for the position of <strong>{{ $('Getting the rows').item.json.role_applied }}</strong> at DevSynt and for your interest in joining our team.</p>  <p>After carefully reviewing your application submitted on {{ $('Getting the rows').item.json.applied_at.split('T')[0] }}, we regret to inform you that we have decided to move forward with other candidates whose qualifications more closely align with our current role requirements.</p>  <p>We appreciate the effort you put into your application and wish you the best of luck in your professional endeavors.</p>  <p>Best regards,<br> <strong>Hiring Team</strong><br> DevSynt</p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        352,
+        336
+      ],
+      "id": "c6da637c-a726-4521-b1f0-9b4c7cf955d1",
+      "name": "rejected",
+      "webhookId": "ad4e55d1-9b54-4a10-95ac-3cbd8347b003",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SCrrj0YVjgkqfo8M",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "candidates",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Getting the rows').item.json.id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "notified"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        576,
+        -48
+      ],
+      "id": "438533d0-a596-444a-be27-df5e8569e1dd",
+      "name": "update as notified",
+      "credentials": {
+        "supabaseApi": {
+          "id": "MLqNr2hTaSM0aIlg",
+          "name": "Supabase account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "candidates",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Getting the rows').item.json.id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "manual_review"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        576,
+        144
+      ],
+      "id": "bbd0f3ce-25be-4e6b-906e-0091906d49a6",
+      "name": "update as manual_review",
+      "credentials": {
+        "supabaseApi": {
+          "id": "MLqNr2hTaSM0aIlg",
+          "name": "Supabase account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "candidates",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $('Getting the rows').item.json.id }}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status",
+              "fieldValue": "rejected"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        576,
+        336
+      ],
+      "id": "bb02ae15-6272-4181-aebe-24b9f70fb305",
+      "name": "update as rejected",
+      "credentials": {
+        "supabaseApi": {
+          "id": "MLqNr2hTaSM0aIlg",
+          "name": "Supabase account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $('normalization').item.json.email }}",
+        "subject": "Application Received - DevSynt",
+        "message": "=<p>Dear <strong>{{ $('normalization').item.json.name }}</strong>,</p>\n\n<p>Thank you for submitting your application for the position of <strong>{{ $('normalization').item.json.role_applied }}</strong> at DevSynt.</p>\n\n<p>We are writing to confirm that we have successfully received your application on {{ $('normalization').item.json.applied_at.split('T')[0] }}. Our team is currently reviewing your profile and will update you shortly regarding the next steps in our hiring process.</p>\n\n<p>Best regards,<br>\n<strong>Hiring Team</strong><br>\nDevSynt</p>",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [
+        240,
+        -320
+      ],
+      "id": "6d05b6a3-f25d-4eed-a77d-750ced42ff25",
+      "name": "acknowledgement mail",
+      "webhookId": "062dbc6f-2c80-41ff-a0b9-fdb31553c892",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "SCrrj0YVjgkqfo8M",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "candidates",
+        "dataToSend": "autoMapInputData"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        48,
+        -320
+      ],
+      "id": "1d73c758-d66a-4c0c-a01e-8bdda57d1df3",
+      "name": "insert into database",
+      "credentials": {
+        "supabaseApi": {
+          "id": "MLqNr2hTaSM0aIlg",
+          "name": "Supabase account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "document",
+        "modelId": {
+          "__rl": true,
+          "value": "models/gemini-3.6-flash",
+          "mode": "list",
+          "cachedResultName": "models/gemini-3.6-flash"
+        },
+        "text": "=Evaluate this candidate resume for the role of {{ $('normalization').item.json.role_applied }}.\n\nResume Content:\n{{ $('normalization').item.json.resume_text }}\n\nScoring Rules:\n- 75-100: Strong matching technical skills and experience[cite: 1]\n- 50-74: Average match, missing key frameworks or sufficient experience[cite: 1]\n- Below 50: Weak match or irrelevant background[cite: 1]\n\nOutput strictly valid JSON and nothing else (no markdown formatting, no code blocks):\n{\n  \"ats_score\": 85,\n  \"classification\": \"Strong\",\n  \"summary\": \"1-2 sentence evaluation summary\"\n}",
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.googleGemini",
+      "typeVersion": 1.2,
+      "position": [
+        448,
+        -320
+      ],
+      "id": "8d821d9d-5bad-446a-ab68-b6568c1b1f6f",
+      "name": "ATC Score/Classification",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "AM27Ogs0qgcYthiQ",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Safely extract text string from Gemini's nested response structure\nlet rawText = \"\";\n\nif ($json.content && $json.content.parts && $json.content.parts[0] && $json.content.parts[0].text) {\n  rawText = $json.content.parts[0].text;\n} else if (typeof $json.text === 'string') {\n  rawText = $json.text;\n} else if (typeof $json === 'string') {\n  rawText = $json;\n} else {\n  rawText = JSON.stringify($json);\n}\n\n// Clean up markdown code fences (```json ... ```)\nconst cleanedText = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();\n\nlet parsedData = {};\n\ntry {\n  parsedData = JSON.parse(cleanedText);\n} catch (error) {\n  // Fallback defaults in case AI response parsing fails\n  parsedData = {\n    ats_score: 50,\n    classification: \"Average\",\n    summary: \"Could not parse AI evaluation output.\"\n  };\n}\n\n// Retrieve candidate ID created in the Supabase 'Create a row' node\nconst candidateId = $('insert into database').item.json.id;\n\nreturn {\n  id: candidateId,\n  ats_score: Number(parsedData.ats_score) || 0,\n  classification: parsedData.classification || \"Average\",\n  manager_notes: parsedData.summary || \"\"\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        656,
+        -320
+      ],
+      "id": "c5d7baea-eb64-4659-852a-8e4872dd77cb",
+      "name": "Structured Text Extractor"
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "candidates",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{ $json.id }}"
+            }
+          ]
+        },
+        "dataToSend": "autoMapInputData"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        848,
+        -320
+      ],
+      "id": "3ae693d7-ffd5-4939-8a98-8a40427a6245",
+      "name": "update the row",
+      "credentials": {
+        "supabaseApi": {
+          "id": "MLqNr2hTaSM0aIlg",
+          "name": "Supabase account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "candidates",
+        "filterType": "string",
+        "filterString": "status equals pending_review"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -160,
+        80
+      ],
+      "id": "9222d75a-aa94-47e9-91e3-e5e7a586a288",
+      "name": "Getting the rows",
+      "credentials": {
+        "supabaseApi": {
+          "id": "MLqNr2hTaSM0aIlg",
+          "name": "Supabase account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "content": "Workflow 1: Normalize Intake Data, Insert Candidate Row, Gemini ATS Review, Update Status to Notified).\n"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -720,
+        -352
+      ],
+      "id": "32350a34-5a66-4dd6-880f-3597bd12cf05",
+      "name": "Sticky Note"
+    },
+    {
+      "parameters": {
+        "content": "Workflow 2: Polled Candidates Retrieval, Classification Branch Routing (Strong/Average/Weak), Email Dispatch, and Status State Updates"
+      },
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -704,
+        96
+      ],
+      "id": "a73c7024-7992-4721-9751-4f3997dd917f",
+      "name": "Sticky Note1"
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "normalization": {
+      "main": [
+        [
+          {
+            "node": "insert into database",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "normalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "Getting the rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch": {
+      "main": [
+        [
+          {
+            "node": "shortlisted",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "manual-review",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Sheets Trigger": {
+      "main": [
+        [
+          {
+            "node": "normalization",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "shortlisted": {
+      "main": [
+        [
+          {
+            "node": "update as notified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "manual-review": {
+      "main": [
+        [
+          {
+            "node": "update as manual_review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "rejected": {
+      "main": [
+        [
+          {
+            "node": "update as rejected",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "acknowledgement mail": {
+      "main": [
+        [
+          {
+            "node": "ATC Score/Classification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "insert into database": {
+      "main": [
+        [
+          {
+            "node": "acknowledgement mail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "ATC Score/Classification": {
+      "main": [
+        [
+          {
+            "node": "Structured Text Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Structured Text Extractor": {
+      "main": [
+        [
+          {
+            "node": "update the row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Getting the rows": {
+      "main": [
+        [
+          {
+            "node": "Switch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "c74da8c6-a0ae-42e5-aed8-e8b0674def92",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "a43ba6ffa629bfe2f101c7e4da7a5a47473018eb1082a0893602a03c970dc3cc"
+  },
+  "nodeGroups": [],
+  "id": "VNjE9MdWyCqH1ZV0",
+  "tags": []
+}
